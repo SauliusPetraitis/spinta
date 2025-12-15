@@ -131,9 +131,6 @@ class Scopes(enum.Enum):
         return self.value
 
 
-ALWAYS_VALID_CONTRACT_SCOPES = {Scopes.AUTH_CLIENTS.value, Scopes.CLIENT_BACKENDS_UPDATE_SELF.value}
-
-
 class AuthorizationServer(rfc6749.AuthorizationServer):
     def __init__(self, context):
         super().__init__()
@@ -368,6 +365,9 @@ class Client(rfc6749.ClientMixin):
         else:
             return True
 
+    def get_all_contract_scopes(self) -> set[str]:
+        return set(chain.from_iterable(self.contract_scopes.values()))
+
 
 def decode_unverified_header(token: str) -> dict[str, Any]:
     try:
@@ -476,6 +476,10 @@ class Token(rfc6749.TokenMixin):
             if single_scope.startswith(prefix):
                 single_scope = single_scope.removeprefix(prefix)
 
+        for action in Action.scope_action_values():
+            if single_scope.endswith(action):
+                single_scope = single_scope.removesuffix(action)
+
         return single_scope
 
     def _get_namespace_scope_map(self, scope_prefixes: list[str]) -> dict[str, set[str]]:
@@ -498,9 +502,7 @@ class Token(rfc6749.TokenMixin):
         """
         scope_namespace_map = self._get_namespace_scope_map(scope_prefixes)
 
-        filtered_namespaces = {
-            namespace for namespace in scope_namespace_map.keys() if namespace.startswith(tuple(model_namespaces))
-        }
+        filtered_namespaces = {namespace for namespace in scope_namespace_map.keys() if namespace in model_namespaces}
         filtered_scopes = set(
             chain.from_iterable(scope_namespace_map.get(namespace, []) for namespace in filtered_namespaces)
         )
@@ -509,8 +511,9 @@ class Token(rfc6749.TokenMixin):
 
     def check_contract_scopes(self, context: Context, model_namespaces: set[str]) -> None:
         config = context.get("config")
+        client = query_client(get_clients_path(config), self.get_client_id())
 
-        contract_scopes = _get_contract_scopes_from_client(config, self.get_client_id())
+        contract_scopes = client.get_all_contract_scopes()
         filtered_jwt_scopes = self._get_scopes_from_model_namespaces(
             model_namespaces, [config.scope_prefix, config.scope_prefix_udts]
         )
@@ -518,7 +521,7 @@ class Token(rfc6749.TokenMixin):
         if not filtered_jwt_scopes:
             raise NoScopesForNamespaces(namespaces=", ".join(model_namespaces))
         elif not contract_scopes.issuperset(filtered_jwt_scopes):
-            raise InvalidExtraScopes(scopes=", ".join(filtered_jwt_scopes - contract_scopes))
+            raise InvalidExtraScopes(extra_scopes=", ".join(filtered_jwt_scopes - contract_scopes))
 
 
 class AdminToken(rfc6749.TokenMixin):
@@ -888,24 +891,6 @@ def authorized(
         is_token_valid = token.check_scope(scopes)
     else:
         is_token_valid = token.valid_scope(scopes)
-
-    # TODO: Task implementation checklist:
-    #  + Check JWT scopes vs node scopes (implemented before task)
-    #  - If check_contract_scopes enabled and node access public, protected, private (node.access < Access.open)
-    #    + Collect all available namespaces
-    #    + Collect all namespaces from JWT token scopes
-    #    + Filter all JWT token scopes that are in available namespaces
-    #       ? Should actions be checked somehow?
-    #           For now, we should check full scope as is letter to letter
-    #       ?! Given namespace "datasets/gov/Dataset", scope "uapi:/datasets/gov/Data" should be invalid
-    #           Yes, it should be invalid, because it does not match full scope letter-to-letter
-    #    + Check filtered JWT scopes vs client.contract_scopes. ALL JWT scopes must be in client.contract_scopes
-    #    - Scopes defined in ALWAYS_VALID_CONTRACT_SCOPES can be in JWT scope even if they are not in contract_scopes
-    #        Not needed. These scopes should be included in contract
-    #    ? Scope auth_clients and client_backends_update_self can always be in JWT token.
-    #      How to distinguish them from actual scopes?
-    #          Scopes should be in uapi format. These scopes must be included in contract. These "system"
-    #          scopes doesn't start with "/". Since uapi prefix actually is "uapi:", not "uapi:/"
 
     # TODO: Update Spinta scopes to check uapi prefix as "uapi:" and not "uapi:/"
 
@@ -1280,16 +1265,12 @@ def query_client(path: pathlib.Path, client: str, is_name: bool = False) -> Clie
 # TODO: Move this method somewhere more appropriate
 def _collect_available_namespaces(context: Context) -> set[str]:
     """Collects all scopes that can be used to get data from currently loaded manifest"""
+
     manifest = context.get("store").manifest
-    model_namespaces = {
-        model_namespace
-        for model_namespace in commands.get_models(context, manifest).keys()
-        if not model_namespace.startswith("_")
-    }
+    model_namespaces = chain.from_iterable(
+        model.get_namespaces()
+        for model in commands.get_models(context, manifest).values()
+        if not model.name.startswith("_")
+    )
 
-    return model_namespaces
-
-
-def _get_contract_scopes_from_client(config: Config, client_id: str) -> set[str]:
-    client = query_client(get_clients_path(config), client_id)
-    return set(chain.from_iterable(client.contract_scopes.values()))
+    return set(model_namespaces)

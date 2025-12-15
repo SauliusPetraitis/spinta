@@ -22,7 +22,6 @@ from spinta.auth import (
     create_client_file,
     _collect_available_namespaces,
     BearerTokenValidator,
-    _get_contract_scopes_from_client,
 )
 from spinta.components import Context
 from spinta.core.config import RawConfig
@@ -739,6 +738,43 @@ def test_pick_correct_key(app, context):
     config.token_validation_key = None
 
 
+class TestQueryClient:
+    def test_get_all_contract_scopes(self, tmp_path: pathlib.Path):
+        clients_path = get_clients_path(tmp_path)
+        ensure_client_folders_exist(clients_path)
+        client_id = str(uuid.uuid4())
+        contract_uuid = str(uuid.uuid4())
+
+        create_client_file(
+            clients_path,
+            name="test_client",
+            client_id=client_id,
+            scopes=["test:scope"],
+            backends={"default": {"foo": "bar"}},
+            contract_scopes={contract_uuid: ["test:scope", "test:scope2"]},
+        )
+
+        client = query_client(clients_path, client_id)
+        assert client.get_all_contract_scopes() == {"test:scope", "test:scope2"}
+
+    def test_get_all_contract_scopes_without_contract_scopes(self, tmp_path: pathlib.Path):
+        clients_path = get_clients_path(tmp_path)
+        ensure_client_folders_exist(clients_path)
+        client_id = str(uuid.uuid4())
+
+        create_client_file(
+            clients_path,
+            name="test_client",
+            client_id=client_id,
+            scopes=["test:scope"],
+            backends={"default": {"foo": "bar"}},
+            contract_scopes=None,
+        )
+
+        client = query_client(clients_path, client_id)
+        assert client.get_all_contract_scopes() == set()
+
+
 class TestCollectAvailableNamespaces:
     def test_return_manifest_namespaces(self, rc: RawConfig):
         context, _ = prepare_manifest(
@@ -757,8 +793,13 @@ class TestCollectAvailableNamespaces:
         )
 
         assert _collect_available_namespaces(context) == {
+            "datasets",
+            "datasets/uuid",
+            "datasets/uuid/example",
             "datasets/uuid/example/Foo",
             "datasets/uuid/example/Bar",
+            "datasets/test",
+            "datasets/test/test_example",
             "datasets/test/test_example/Buz",
         }
 
@@ -784,7 +825,7 @@ class TestTokenNamespaceScopeMap:
             "datasets_gov_rc_ar_ws_Town": {"datasets_gov_rc_ar_ws_Town"},
         }
 
-    def test_remove_scope_prefix_from_scope_string(self, context: Context):
+    def test_remove_scope_prefix_and_suffix_from_scope_string(self, context: Context):
         config = context.get("config")
 
         pkey = auth.load_key(context, auth.KeyType.private)
@@ -798,10 +839,10 @@ class TestTokenNamespaceScopeMap:
         token = auth.Token(token, BearerTokenValidator(context))
 
         assert token._get_namespace_scope_map([config.scope_prefix, config.scope_prefix_udts]) == {
-            "datasets/gov/rc/ar/ws/Country/:getall": {"uapi:/datasets/gov/rc/ar/ws/Country/:getall"},
-            "datasets2/Street/:getone": {"uapi:/datasets2/Street/:getone"},
-            "datasets_gov_rc_ar_ws_Country_getall": {"spinta_datasets_gov_rc_ar_ws_Country_getall"},
-            "datasets_gov_rc_ar_ws_Town_getone": {"spinta_datasets_gov_rc_ar_ws_Town_getone"},
+            "datasets/gov/rc/ar/ws/Country": {"uapi:/datasets/gov/rc/ar/ws/Country/:getall"},
+            "datasets2/Street": {"uapi:/datasets2/Street/:getone"},
+            "datasets_gov_rc_ar_ws_Country": {"spinta_datasets_gov_rc_ar_ws_Country_getall"},
+            "datasets_gov_rc_ar_ws_Town": {"spinta_datasets_gov_rc_ar_ws_Town_getone"},
         }
 
 
@@ -811,6 +852,7 @@ class TestGetScopesFromModelNamespaces:
         "uapi:/datasets/gov/rc/ar/ws/Country/:getone",
         "uapi:/datasets/gov/rc/ar/ws/Town/:getall",
         "uapi:/datasets/gov/rc/ar/ws/Town/:getone",
+        "uapi:/datasets/gov/rc/ar/ws/Town",
         "uapi:/datasets/aa/ba/ca/da/Ea",
         "uapi:/datasets/aa/ba/Cc",
         "uapi:/datasets/Ab",
@@ -819,6 +861,7 @@ class TestGetScopesFromModelNamespaces:
         "spinta_datasets_gov_rc_ar_ws_Country_getone",
         "spinta_datasets_gov_rc_ar_ws_Town_getall",
         "spinta_datasets_gov_rc_ar_ws_Town_getone",
+        "spinta_datasets_gov_rc_ar_ws_Town",
         "spinta_datasets2_aa_ba_ca_da_Ea",
         "spinta_datasets3_ac_bc_Cc",
         "spinta_datasets3_Ab",
@@ -830,22 +873,22 @@ class TestGetScopesFromModelNamespaces:
         [
             (set(), set()),
             ("test/test", set()),
+            ({"datasets/gov"}, set()),
+            ({"datasets/gov/rc/ar/ws/Count"}, set()),  # Count model does not exist
+            ({"datasets/aa/ba/ca/da/Ea"}, {"uapi:/datasets/aa/ba/ca/da/Ea"}),
             (
-                {"datasets/gov"},
+                {"datasets3_Ab", "datasets/gov/rc/ar/ws/Town"},
                 {
-                    "uapi:/datasets/gov/rc/ar/ws/Country/:getall",
-                    "uapi:/datasets/gov/rc/ar/ws/Country/:getone",
+                    "spinta_datasets3_Ab",
                     "uapi:/datasets/gov/rc/ar/ws/Town/:getall",
                     "uapi:/datasets/gov/rc/ar/ws/Town/:getone",
+                    "uapi:/datasets/gov/rc/ar/ws/Town",
                 },
             ),
-            ({"datasets/aa"}, {"uapi:/datasets/aa/ba/ca/da/Ea", "uapi:/datasets/aa/ba/Cc"}),
             (
-                {"datasets/aa", "datasets3_Ab"},
-                {"uapi:/datasets/aa/ba/ca/da/Ea", "uapi:/datasets/aa/ba/Cc", "spinta_datasets3_Ab"},
+                {"datasets_gov_rc_ar_ws_Country"},
+                {"spinta_datasets_gov_rc_ar_ws_Country_getall", "spinta_datasets_gov_rc_ar_ws_Country_getone"},
             ),
-            # TODO: This test should work, because there is no model Count
-            # ({"datasets/gov/rc/ar/ws/Count"}, set()),
         ],
     )
     def test_return_jwt_scopes_that_starts_with_namespace(
@@ -861,49 +904,6 @@ class TestGetScopesFromModelNamespaces:
             token._get_scopes_from_model_namespaces(namespaces, [config.scope_prefix, config.scope_prefix_udts])
             == result
         )
-
-
-class TestGetContractScopesFromClient:
-    def test_get_client_contract_scopes(self, rc: RawConfig, tmp_path: pathlib.Path):
-        rc = rc.fork({"config_path": str(tmp_path)})
-        context = create_test_context(rc).load()
-        config = context.get("config")
-
-        clients_path = get_clients_path(tmp_path)
-        ensure_client_folders_exist(clients_path)
-        client_id = str(uuid.uuid4())
-        contract_uuid = str(uuid.uuid4())
-
-        create_client_file(
-            clients_path,
-            name="test_client",
-            client_id=client_id,
-            scopes=["test:scope"],
-            backends={"default": {"foo": "bar"}},
-            contract_scopes={contract_uuid: ["test:scope", "test:scope2"]},
-        )
-
-        assert _get_contract_scopes_from_client(config, client_id) == {"test:scope", "test:scope2"}
-
-    def test_get_client_contract_scopes_from_file_without_contract_scopes(self, rc: RawConfig, tmp_path: pathlib.Path):
-        rc = rc.fork({"config_path": str(tmp_path)})
-        context = create_test_context(rc).load()
-        config = context.get("config")
-
-        clients_path = get_clients_path(tmp_path)
-        ensure_client_folders_exist(clients_path)
-        client_id = str(uuid.uuid4())
-
-        create_client_file(
-            clients_path,
-            name="test_client",
-            client_id=client_id,
-            scopes=["test:scope"],
-            backends={"default": {"foo": "bar"}},
-            contract_scopes=None,
-        )
-
-        assert _get_contract_scopes_from_client(config, client_id) == set()
 
 
 class TestCheckContractScopes:
@@ -927,8 +927,12 @@ class TestCheckContractScopes:
         token = auth.Token(token, BearerTokenValidator(context))
         context.set("auth.token", token)
 
-        with pytest.raises(InvalidExtraScopes):
-            token.check_contract_scopes(context, model_namespaces={"datasets/test/example"})
+        with pytest.raises(InvalidExtraScopes) as e:
+            token.check_contract_scopes(context, model_namespaces={"datasets/test/example/Foo"})
+        assert e.value.message == (
+            "Request contains extra scopes that are not defined in contract. "
+            "Extra scopes: uapi:/datasets/test/example/Foo."
+        )
 
     def test_raise_error_if_token_has_no_scopes(self, rc: RawConfig):
         context, _ = prepare_manifest(
@@ -946,8 +950,9 @@ class TestCheckContractScopes:
         token = auth.Token(token, BearerTokenValidator(context))
         context.set("auth.token", token)
 
-        with pytest.raises(NoScopesForNamespaces):
-            token.check_contract_scopes(context, model_namespaces={"datasets/test/example"})
+        with pytest.raises(NoScopesForNamespaces) as e:
+            token.check_contract_scopes(context, model_namespaces={"datasets/test/example/Foo"})
+        assert e.value.message == ("Request contains no scopes from available namespaces: datasets/test/example/Foo.")
 
     def test_raise_error_if_token_has_no_scopes_in_available_namespaces(self, rc: RawConfig):
         context, _ = prepare_manifest(
@@ -966,8 +971,9 @@ class TestCheckContractScopes:
         token = auth.Token(token, BearerTokenValidator(context))
         context.set("auth.token", token)
 
-        with pytest.raises(NoScopesForNamespaces):
-            token.check_contract_scopes(context, model_namespaces={"datasets/test/example"})
+        with pytest.raises(NoScopesForNamespaces) as e:
+            token.check_contract_scopes(context, model_namespaces={"datasets/test/example/Foo"})
+        assert e.value.message == ("Request contains no scopes from available namespaces: datasets/test/example/Foo.")
 
     def test_raise_error_if_token_has_more_scopes_than_contracts_in_available_namespace(self, rc: RawConfig):
         context, _ = prepare_manifest(
@@ -990,8 +996,12 @@ class TestCheckContractScopes:
         token = auth.Token(token, BearerTokenValidator(context))
         context.set("auth.token", token)
 
-        with pytest.raises(InvalidExtraScopes):
-            token.check_contract_scopes(context, model_namespaces={"datasets/test/example"})
+        with pytest.raises(InvalidExtraScopes) as e:
+            token.check_contract_scopes(context, model_namespaces={"datasets/test/example/Foo"})
+        assert e.value.message == (
+            "Request contains extra scopes that are not defined in contract. "
+            "Extra scopes: uapi:/datasets/test/example/Foo/:getall."
+        )
 
     def test_success_if_token_has_more_scopes_than_contracts_outside_available_namespace(self, rc: RawConfig):
         context, _ = prepare_manifest(
@@ -1014,7 +1024,7 @@ class TestCheckContractScopes:
         token = auth.Token(token, BearerTokenValidator(context))
         context.set("auth.token", token)
 
-        assert token.check_contract_scopes(context, model_namespaces={"datasets/test/example"}) is None
+        assert token.check_contract_scopes(context, model_namespaces={"datasets/test/example/Foo"}) is None
 
     def test_success_if_token_has_same_scopes_as_contract(self, rc: RawConfig):
         context, _ = prepare_manifest(
@@ -1043,7 +1053,7 @@ class TestCheckContractScopes:
         token = auth.Token(token, BearerTokenValidator(context))
         context.set("auth.token", token)
 
-        namespaces = {"datasets_test_example", "datasets/test/example"}
+        namespaces = {"datasets_test_example_Bar", "datasets/test/example/Foo"}
         assert token.check_contract_scopes(context, model_namespaces=namespaces) is None
 
     def test_success_if_token_has_less_scopes_than_contract(self, rc: RawConfig):
@@ -1069,4 +1079,4 @@ class TestCheckContractScopes:
         token = auth.Token(token, BearerTokenValidator(context))
         context.set("auth.token", token)
 
-        assert token.check_contract_scopes(context, model_namespaces={"datasets/test/example"}) is None
+        assert token.check_contract_scopes(context, model_namespaces={"datasets/test/example/Foo"}) is None
